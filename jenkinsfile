@@ -1,17 +1,197 @@
 pipeline {
+
     agent any
 
+    environment {
+        APP_NAME = 'zomato-app'
+        DOCKER_IMAGE = "YOUR_DOCKERHUB_USERNAME/zomato-app"
+    }
+
     stages {
+
+        // =========================================================
+        // 1. CHECKOUT
+        // =========================================================
+
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Test') {
+
+        // =========================================================
+        // 2. SONARQUBE
+        // =========================================================
+
+        stage('SonarQube Scan') {
             steps {
-                sh 'ls -la'
+
+                withCredentials([
+                    string(
+                        credentialsId: 'sonar-token',
+                        variable: 'SONAR_TOKEN'
+                    )
+                ]) {
+
+                    sh '''
+                        docker run --rm \
+                          --network cicd-network \
+                          -v jenkins_home:/var/jenkins_home \
+                          -w /var/jenkins_home/workspace/${JOB_NAME} \
+                          -e SONAR_TOKEN="$SONAR_TOKEN" \
+                          sonarsource/sonar-scanner-cli:latest \
+                          -Dsonar.projectKey=zomato-app \
+                          -Dsonar.projectName=zomato-app \
+                          -Dsonar.sources=. \
+                          -Dsonar.host.url=http://sonarqube:9000 \
+                          -Dsonar.token="$SONAR_TOKEN"
+                    '''
+                }
             }
+        }
+
+
+        // =========================================================
+        // 3. OWASP DEPENDENCY CHECK
+        // =========================================================
+
+        stage('OWASP Dependency Check') {
+            steps {
+
+                sh '''
+                    docker run --rm \
+                      -v jenkins_home:/var/jenkins_home \
+                      -v dependency_check_data:/usr/share/dependency-check/data \
+                      owasp/dependency-check:latest \
+                      --scan /var/jenkins_home/workspace/${JOB_NAME} \
+                      --format HTML \
+                      --out /var/jenkins_home/workspace/${JOB_NAME}/dependency-check-report
+                '''
+            }
+        }
+
+
+        // =========================================================
+        // 4. DOCKER BUILD
+        // =========================================================
+
+        stage('Docker Build') {
+            steps {
+
+                sh '''
+                    docker build \
+                      -t ${APP_NAME}:${BUILD_NUMBER} \
+                      .
+                '''
+            }
+        }
+
+
+        // =========================================================
+        // 5. TRIVY SECURITY SCAN
+        // =========================================================
+
+        stage('Trivy Security Scan') {
+            steps {
+
+                sh '''
+                    docker run --rm \
+                      -v /var/run/docker.sock:/var/run/docker.sock \
+                      -v trivy_cache:/root/.cache \
+                      aquasec/trivy:latest \
+                      image \
+                      --severity HIGH,CRITICAL \
+                      --exit-code 1 \
+                      ${APP_NAME}:${BUILD_NUMBER}
+                '''
+            }
+        }
+
+
+        // =========================================================
+        // 6. DOCKER HUB PUSH
+        // =========================================================
+
+        stage('Docker Hub Push') {
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
+                ]) {
+
+                    sh '''
+                        echo "$DOCKERHUB_TOKEN" | docker login \
+                          -u "$DOCKERHUB_USERNAME" \
+                          --password-stdin
+
+                        docker tag \
+                          ${APP_NAME}:${BUILD_NUMBER} \
+                          $DOCKERHUB_USERNAME/${APP_NAME}:${BUILD_NUMBER}
+
+                        docker push \
+                          $DOCKERHUB_USERNAME/${APP_NAME}:${BUILD_NUMBER}
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+
+        // =========================================================
+        // 7. DEPLOY
+        // =========================================================
+
+        stage('Deploy') {
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub',
+                        usernameVariable: 'DOCKERHUB_USERNAME',
+                        passwordVariable: 'DOCKERHUB_TOKEN'
+                    )
+                ]) {
+
+                    sh '''
+                        docker stop ${APP_NAME} || true
+
+                        docker rm ${APP_NAME} || true
+
+                        docker run -d \
+                          --name ${APP_NAME} \
+                          --restart unless-stopped \
+                          -p 3000:3000 \
+                          ${DOCKERHUB_USERNAME}/${APP_NAME}:${BUILD_NUMBER}
+                    '''
+                }
+            }
+        }
+    }
+
+
+    // =============================================================
+    // POST BUILD
+    // =============================================================
+
+    post {
+
+        success {
+            echo '============================================'
+            echo ' ZOMATO CI/CD PIPELINE SUCCESSFUL'
+            echo '============================================'
+            echo 'Application deployed on port 3000'
+        }
+
+        failure {
+            echo '============================================'
+            echo ' ZOMATO CI/CD PIPELINE FAILED'
+            echo '============================================'
         }
     }
 }
