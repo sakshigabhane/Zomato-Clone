@@ -56,20 +56,30 @@ pipeline {
         // 3. OWASP DEPENDENCY CHECK
         // =========================================================
 
-        stage('OWASP Dependency Check') {
-            steps {
+       stage('OWASP Dependency Check') {
+    steps {
 
-                sh '''
-                    docker run --rm \
-                      -v jenkins_home:/var/jenkins_home \
-                      -v dependency_check_data:/usr/share/dependency-check/data \
-                      owasp/dependency-check:latest \
-                      --scan /var/jenkins_home/workspace/${JOB_NAME} \
-                      --format HTML \
-                      --out /var/jenkins_home/workspace/${JOB_NAME}/dependency-check-report
-                '''
-            }
+        withCredentials([
+            string(
+                credentialsId: 'nvd-api-key',
+                variable: 'NVD_API_KEY'
+            )
+        ]) {
+
+            sh '''
+                docker run --rm \
+                  -v jenkins_home:/var/jenkins_home \
+                  -v dependency_check_data:/usr/share/dependency-check/data \
+                  -e NVD_API_KEY="$NVD_API_KEY" \
+                  owasp/dependency-check:latest \
+                  --scan /var/jenkins_home/workspace/${JOB_NAME} \
+                  --nvdApiKey "$NVD_API_KEY" \
+                  --format HTML \
+                  --out /var/jenkins_home/workspace/${JOB_NAME}/dependency-check-report
+            '''
         }
+    }
+}
 
 
         // =========================================================
